@@ -1,0 +1,27 @@
+# This docker-compose file sets up the dynamodb-local container to listen for requests
+# from your application. To make use of this, your application needs to be configured
+# for a local environment to send data requests to http://dynamodb:8000 when executing
+# from within the serverless-network in docker
+#
+# From your laptop, with the AWS CLI you can use the endpoint-url parameter:
+#    aws dynamodb list-tables --endpoint-url http://localhost:8111
+
+services:
+  dynamodb: # This is the name of the running container, which will receive requests directed to http://dynamodb
+    image: amazon/dynamodb-local:latest
+    entrypoint: java
+    command: "-jar DynamoDBLocal.jar -sharedDb" # Using the -sharedDb option allows this table to be readable from both within the local microservice and from the CLI.
+    ports:
+      - 8111:8000
+      # DDB listens on 8000 inside the container
+      # We have the container map port 8111 to 8000 so that
+      # we avoid conflicts on 8000 in the docker host (i.e. your laptop)
+      # You can change 8111 to any other unused port, but you'll need to change
+      # it in the local_setup/init-dynamodb-local/init-dynamodb-local.mts script as well.
+networks:
+  default:
+    name: serverless-network
+    external: true
+    # The network can be renamed to whatever you want
+    # If you change this here, it also needs to be changed in the package.json scripts
+    # in the "service" script and in the "dynamo:network" script.

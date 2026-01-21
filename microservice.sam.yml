@@ -1,0 +1,462 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Slalom's app accelerator for SAM APIs
+Parameters:
+  paramEnvironment:
+    Type: String
+    Description: Which environment do you want to deploy to? (local, dev, test, or prod)
+    AllowedValues:
+      - local
+      - dev
+      - test
+      - prod
+    Default: local
+  paramFeatureBranch:
+    Type: String
+    Description: Provide the name of the feature branch if this is not a build from the main code branch.
+    Default: ""
+  paramServiceName:
+    Type: String
+    Description: The name of the service
+    Default: docgen
+  paramApplicationName:
+    Type: String
+    Description: This is the name of your whole system, which likely is composed of multiple microservices and possibly a frontend also.
+    Default: business-at-slalom
+  paramReleaseVersion:
+    Type: String
+    Description: The Release Version number
+    Default: 0.0.1
+  paramBuildBasePath:
+    Type: String
+    Description: Option to build the API Gateway Base Path Mapping (requires a Custom Domain to be pre-configured)
+    AllowedValues:
+      - yes
+      - no
+    Default: yes
+  paramLogRetention:
+    Type: Number
+    Description: Number of days to keep logs
+    Default: 30
+
+Mappings:
+  # SETUP: Customize your microservice with environment-specific configuration in this section
+  # The mappings section doesn't fully support Intrinsic functions like !Ref or !Sub
+  # so values here need to be hard-coded instead of based on parameters.
+  env:
+    local:
+      secretName: dev-engagements
+      localDomain: api.accelerator.gapi.devslalom.com
+    dev:
+      secretName: dev-engagements
+    test:
+      secretName: test-engagements
+    prod:
+      secretName: prod-engagements
+
+Conditions:
+  conditionIsProd: !Equals [!Ref paramEnvironment, prod]
+  condNotFeatureBranch: !Equals [!Ref paramFeatureBranch, ""]
+  conditionBuildBasePath: !Equals [!Ref paramBuildBasePath, yes]
+
+Globals:
+  Function:
+    # Properties of AWS::Serverless::Function
+    Handler: handler.handler
+    Runtime: nodejs20.x
+    MemorySize: 512
+    Timeout: 28 # Set to 28 because the max timeout for API Gateway is 30 seconds
+    Architectures:
+      # Using graviton2 arm-based processors by default
+      - arm64 # switch to "x86_64" for x86 processors
+    # VpcConfig: # For attaching your Lambda Functions to a VPC
+    Environment:
+      Variables:
+        # Add any additional environment variables here
+        serviceName: !Ref paramServiceName
+        featureBranchName: !Ref paramFeatureBranch
+        environmentName: !Ref paramEnvironment
+        releaseVersion: !Ref paramReleaseVersion
+        logLevel: info
+        domain:
+          Fn::ImportValue: !Sub export-environment-domain-api-${paramApplicationName}-${paramEnvironment}
+        localDomain: !FindInMap [env, local, localDomain] # Fallback for specifying the integration domain when running locally
+        secretName: !FindInMap [env, !Ref paramEnvironment, secretName]
+        dbTableName: !Sub "${paramEnvironment}${paramFeatureBranch}_${paramServiceName}"
+        PARAMETERS_SECRETS_EXTENSION_HTTP_PORT: "2773"
+        PARAMETERS_SECRETS_EXTENSION_LOG_LEVEL: info # debug, info, warn, error, or none
+        SECRETS_MANAGER_TTL: 300
+        LUMIGO_TOKEN: "{{resolve:secretsmanager:lumigo-token:SecretString}}"
+    Layers:
+      # Include the Layer for AWS Parameters and Secrets
+      # SETUP - replace the below ARN with the correct ARN for your region
+      # (https://docs.aws.amazon.com/secretsmanager/latest/userguide/retrieving-secrets_lambda.html)
+      # (https://docs.aws.amazon.com/systems-manager/latest/userguide/ps-integration-lambda-extensions.html#ps-integration-lambda-extensions-add)
+      - arn:aws:lambda:us-east-1:177933569100:layer:AWS-Parameters-and-Secrets-Lambda-Extension-Arm64:11
+      # - arn:aws:lambda:us-east-2:590474943231:layer:AWS-Parameters-and-Secrets-Lambda-Extension-Arm64:11
+      # - arn:aws:lambda:us-west-1:997803712105:layer:AWS-Parameters-and-Secrets-Lambda-Extension-Arm64:8
+      # - arn:aws:lambda:us-west-2:345057560386:layer:AWS-Parameters-and-Secrets-Lambda-Extension-Arm64:11
+      # - arn:aws:lambda:ap-northeast-1:133490724326:layer:AWS-Parameters-and-Secrets-Lambda-Extension-Arm64:11
+      # - arn:aws:lambda:ap-northeast-3:576959938190:layer:AWS-Parameters-and-Secrets-Lambda-Extension-Arm64:8
+      # - arn:aws:lambda:ap-southeast-2:665172237481:layer:AWS-Parameters-and-Secrets-Lambda-Extension-Arm64:11
+      # - arn:aws:lambda:ca-central-1:200266452380:layer:AWS-Parameters-and-Secrets-Lambda-Extension-Arm64:8
+      # - arn:aws:lambda:eu-central-1:187925254637:layer:AWS-Parameters-and-Secrets-Lambda-Extension-Arm64:11
+      # - arn:aws:lambda:eu-west-1:015030872274:layer:AWS-Parameters-and-Secrets-Lambda-Extension-Arm64:11
+      # - arn:aws:lambda:eu-west-2:133256977650:layer:AWS-Parameters-and-Secrets-Lambda-Extension-Arm64:11
+    Tags:
+      Application: !Ref paramServiceName
+      Environment: !Ref paramEnvironment
+    Tracing:
+      # Turn on X-Ray Tracing for Prod only
+      !If
+      - conditionIsProd
+      - Active
+      - PassThrough
+
+Resources:
+  # Lambda Execution Role
+  # This IAM Role is assigned to all of the Lambda functions in this microservice.
+  # This helps reduce the number of IAM Roles that get created.
+  # This also creates a permissions scope for the whole microservice.
+  # If your AWS governance restricts creation of IAM Roles for developers, then
+  # move this resource into a stack that is created for each environment for this
+  # microservice and import the Role ARN into this template.
+  resIamRoleLambdaExecution:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${paramEnvironment}${paramFeatureBranch}_${paramServiceName}_ExecutionRole"
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [lambda.amazonaws.com]
+            Action: sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        # - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole  # For use with Lambda Functions connected to a VPC
+        - arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess
+        # This policy is needed for access the secrets created by the KMS CFN Stack
+        - Fn::ImportValue: !Sub "export-${paramEnvironment}-iam-decrypt-managed-policy-${paramServiceName}"
+      Policies:
+        # Allow Lambda Functions to perform CRUD operations on the DynamoDB table within this microservice
+        - PolicyName: DynamoDBTableCRUD
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:PutItem
+                  - dynamodb:Scan
+                  - dynamodb:Query
+                  - dynamodb:UpdateItem
+                  - dynamodb:BatchWriteItem
+                  - dynamodb:BatchGetItem
+                  - dynamodb:DescribeTable
+                  - dynamodb:ConditionCheckItem
+                Resource:
+                  - !GetAtt resDynamoTable.Arn
+                  - !Sub "${resDynamoTable.Arn}/index/*"
+        # Uncomment to allow Lambda Functions to access the streams of the DynamoDB table within this microservice
+        # - PolicyName: DynamoDBStreamReadAccess
+        #   PolicyDocument:
+        #     Version: 2012-10-17
+        #     Statement:
+        #       - Effect: Allow
+        #         Action:
+        #           - dynamodb:DescribeStream
+        #           - dynamodb:GetShardIterator
+        #           - dynamodb:ListStreams
+        #           - dynamodb:GetRecords
+        #           - dynamodb:ListShards
+        #         Resource:
+        #           - !GetAtt resDynamoTable.StreamArn
+        # The following two policies are placed here as examples for how to execute M2M requests through API Gateway.
+        # Allow Lambda Functions to make API Gateway requests to other microservices
+        # - PolicyName: CrossMicroserviceApiAccess
+        #   PolicyDocument:
+        #     Version: 2012-10-17
+        #     Statement:
+        #       - Effect: Allow
+        #         Action:
+        #           - execute-api:Invoke
+        #         Resource:
+        #           # In order to reference another APIGW, you must know the API ID.
+        #           # In this line, we use "*" as an example. It is best to use an Import to get an exact API ID.
+        #           - !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:*/${paramEnvironment}/*"
+        # Allow Lambda Functions to use STS Assume Role action to a different role (optional - this can be removed if not needed)
+        # - PolicyName: AssumeNewRole
+        #   PolicyDocument:
+        #     Version: 2012-10-17
+        #     Statement:
+        #       - Effect: Allow
+        #         Action:
+        #           - sts:AssumeRole
+        #         Resource:
+        #           # You may reference an IAM role in the same account or a different account.
+        #           # This example allows to assume role to the same ExecutionRole that Lambda already uses,
+        #           # so this is superfluous. Remove this, or use it as an example for assuming a different role.
+        #           - !Sub "arn:aws:iam::${AWS::AccountId}:role/new_role_name"
+
+  # Lambda Function Definitions
+  ### Add AWS::Serverless::Function definitions for non-API-handler Lambdas here.
+  ### API-handler Lambda definitions are generated by tsoa as part of the build.
+
+  # Log Groups
+  ### Defining log groups like this allows for two main objectives:
+  ### A) Log retention is set so that old log entries are removed
+  ### B) Log groups and all logs are deleted when the CloudFormation stack is deleted
+  ###
+  ### Add AWS::Serverless::Function definitions for non-API-handler Lambdas here.
+  ### Log groups for API-handler Lambdas are generated by tsoa as part of the build.
+  ###
+  ### IMPORTANT/CAUTION: Changing the route or name for decorated API endpoint handler functions will change the
+  ### resource ID for the Lambda and Log Group resources, which could have the effect of deleting existing log groups.
+
+  # API Gateway Log Groups
+  resApiGatewayAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: !Ref paramLogRetention
+      # The Access Log location can be any log group you want. Choose your preferred log group name.
+      LogGroupName: !If
+        - condNotFeatureBranch
+        - !Sub "/aws/apigateway/accesslogs/${paramServiceName}/${paramEnvironment}"
+        - !Sub "/aws/apigateway/accesslogs/${paramServiceName}/${paramEnvironment}/branch/${paramFeatureBranch}"
+
+  resApiGatewayExecutionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: !Ref paramLogRetention
+      # The Execution Log location cannot be customized. It must be this exact LogGroupName
+      LogGroupName: !Sub "API-Gateway-Execution-Logs_${resApiGateway}/${paramEnvironment}"
+
+  # DynamoDB Table definitions
+  ### Your application may use multiple DynamoDB tables. Define them all here.
+  ### Delete this if you are not using DynamoDB. There is an provisioning cost to each DynamoDB table, so be aware of that.
+  resDynamoTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${paramEnvironment}${paramFeatureBranch}_${paramServiceName}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk # Generic attribute name for "PartitionKey"
+          AttributeType: S
+        - AttributeName: sk # Generic attribute name for "SortKey"
+          AttributeType: S
+        - AttributeName: itemId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      LocalSecondaryIndexes:
+        - IndexName: itemId
+          KeySchema:
+            - AttributeName: pk
+              KeyType: HASH
+            - AttributeName: itemId
+              KeyType: RANGE
+          Projection:
+            ProjectionType: KEYS_ONLY
+      GlobalSecondaryIndexes:
+        - IndexName: globalItemId
+          KeySchema:
+            - AttributeName: itemId
+              KeyType: HASH
+            - AttributeName: pk
+              KeyType: RANGE
+          Projection:
+            ProjectionType: KEYS_ONLY
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: False # Enable this for Point-In-Time Recovery
+      SSESpecification:
+        SSEEnabled: True # Enable this to have server-side encryption
+      # TimeToLiveSpecification:
+      #   AttributeName: timeToLive
+      #   Enabled: True # Disable this to remove timeToLive functionality from the table
+      Tags:
+        - Key: Application
+          Value: !Ref paramServiceName
+        - Key: Environment
+          Value: !Ref paramEnvironment
+      # Specify a StreamViewType for dynamoDB Stream
+      # StreamSpecification:
+      #   StreamViewType: 'KEYS_ONLY' | 'NEW_IMAGE' | 'OLD_IMAGE' | 'NEW_AND_OLD_IMAGES'
+
+  ########
+  # API Gateway definition
+  # Explicitly defining an API Gateway in SAM is optional, but doing so
+  # gives us a lot more flexibility in configuring the features of the API Gateway
+  # Including the "DefinitionBody" or "DefinitionUri" property is optional. It is omitted in
+  # this example implementation for brevity. We have found that using inline swagger in the "DefinitionBody"
+  # property is the most flexible way of defining custom authentication on each endpoint in the API.
+  # However, it is at the cost of a lot of developer frustration, so we have removed it.
+  ########
+  resApiGateway:
+    Type: AWS::Serverless::Api
+    Properties:
+      # The API Name must be the same as the configured API Name in the API Alarms (resAlarmRestApi500 and resAlarmRestApiLatency)
+      Name: !Sub "${paramEnvironment} ${paramServiceName} ${paramFeatureBranch}"
+      Description: !Sub "${paramEnvironment}${paramFeatureBranch} environment API for ${paramServiceName}"
+      StageName: !Ref paramEnvironment
+      AccessLogSetting:
+        DestinationArn: !GetAtt resApiGatewayAccessLogGroup.Arn
+        # SETUP: Customize your access logs to meet your needs (https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-logging-variables.html)
+        Format: $context.identity.sourceIp $context.identity.caller $context.identity.user [$context.requestTime] "$context.httpMethod $context.resourcePath $context.protocol" $context.status $context.responseLength $context.requestId
+      Auth:
+        DefaultAuthorizer: AWS_IAM
+        InvokeRole: NONE
+      Cors:
+        AllowMethods: "'GET,POST,PUT,PATCH,DELETE'"
+        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,correlation-object,x-amz-security-token'"
+        AllowOrigin: "'*'" # SETUP: Change this to your front-end URL for better security
+      DisableExecuteApiEndpoint: !If
+        - conditionBuildBasePath
+        - true
+        - false
+      EndpointConfiguration:
+        Type: REGIONAL
+      MethodSettings:
+        - LoggingLevel: INFO # In order to enable API Gateway logging, permissions must be setup: https://aws.amazon.com/premiumsupport/knowledge-center/api-gateway-cloudwatch-logs/
+          MetricsEnabled: True
+          DataTraceEnabled: True
+          ResourcePath: "/*"
+          HttpMethod: "*"
+          # Set CachingEnabled false as default for all resources. To enable caching for a resource configure
+          # a MethodSettings entry with CachingEnabled: true, HttpMethod: GET, CacheTtlInSeconds: 3600, and appropriate ResourcePath,
+          CachingEnabled: false
+      MinimumCompressionSize: 860
+      OpenApiVersion: "3.0.1" # This property must be a quoted string
+      TracingEnabled:
+        # Turn on X-Ray Tracing for Prod only
+        !If
+        - conditionIsProd
+        - True
+        - !Ref AWS::NoValue
+      Tags:
+        Application: !Ref paramServiceName
+        Environment: !Ref paramEnvironment
+      GatewayResponses:
+        # Return CORS Headers for 401 and 403 responses
+        UNAUTHORIZED:
+          StatusCode: "401"
+          ResponseParameters:
+            Headers:
+              Access-Control-Expose-Headers: "'*'"
+              Access-Control-Allow-Origin: "'*'"
+          ResponseTemplates:
+            "application/json": '{ "message": $context.error.messageString }'
+        ACCESS_DENIED:
+          StatusCode: "403"
+          ResponseParameters:
+            Headers:
+              Access-Control-Expose-Headers: "'*'"
+              Access-Control-Allow-Origin: "'*'"
+          ResponseTemplates:
+            "application/json": '{ "message": $context.error.messageString }'
+
+  # The BasePathMapping will fail if there is not a "Custom Domain Name" configured in the API Gateway Console. See README.md for details.
+  # This can be disabled by removing this resource. You will then need to get the API Gateway's stage url from the API Gateway resource.
+  resAPIBasePathMapping:
+    Type: AWS::ApiGateway::BasePathMapping
+    Condition: conditionBuildBasePath
+    DependsOn: resApiGatewayStage
+    Properties:
+      BasePath: !If
+        - condNotFeatureBranch
+        - !Sub "${paramServiceName}"
+        - !Sub "${paramServiceName}-${paramFeatureBranch}"
+      DomainName:
+        Fn::ImportValue: !Sub export-environment-domain-api-${paramApplicationName}-${paramEnvironment}
+      RestApiId: !Ref resApiGateway
+      Stage: !Ref paramEnvironment
+
+  # Api Key Resources Definitions
+  ### resApiKey: This resource creates a randomly generated Api key for use with a usage plan
+  ### The key value can be static by setting here. If no static value set, the key value will change whenever the stack is created
+  resApiKey:
+    Type: AWS::ApiGateway::ApiKey
+    DependsOn: resApiGateway
+    Properties:
+      Name: !Sub "${paramEnvironment}${paramFeatureBranch}_${paramServiceName}"
+      Description: !Sub "Access to specific endpoints in API ${paramEnvironment} ${paramServiceName} ${paramFeatureBranch}"
+      Enabled: true
+
+  ### resUsagePlan: Creates a usage plan that will have the associated key above
+  ### No limitations set on this usage plan. Those can be added in properties.
+  resUsagePlan:
+    Type: AWS::ApiGateway::UsagePlan
+    DependsOn: resApiGatewayStage
+    Properties:
+      UsagePlanName: !Sub "${paramEnvironment}${paramFeatureBranch}_${paramServiceName}_usagePlan"
+      Description: Unlimited usage plan
+      ApiStages:
+        - ApiId: !Ref resApiGateway
+          Stage: !Ref paramEnvironment
+
+  ### resUsagePlanKey: Creates an association between the usage plan and api key defined above
+  resUsagePlanKey:
+    Type: AWS::ApiGateway::UsagePlanKey
+    Properties:
+      KeyId: !Ref resApiKey
+      KeyType: API_KEY
+      UsagePlanId: !Ref resUsagePlan
+
+  ### WAF Association
+  resWafAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    DependsOn: resApiGatewayStage
+    Properties:
+      ResourceArn: !Sub arn:aws:apigateway:${AWS::Region}::/restapis/${resApiGateway}/stages/${paramEnvironment}
+      WebACLArn:
+        Fn::ImportValue: !Sub export-environment-waf-api-${paramApplicationName}-${paramEnvironment}
+
+  #
+  # MONITORING ALARMS for PROD
+  # separated into a nested stack, since it is not needed for feature branches or lower environments
+  #
+  resNestedStackMonitoring:
+    Type: AWS::CloudFormation::Stack
+    Condition: conditionIsProd
+    Properties:
+      TemplateURL: microservice.sam.monitoring.yml
+      Parameters:
+        paramEnvironment: !Ref paramEnvironment
+        paramFeatureBranch: !Ref paramFeatureBranch
+        paramServiceName: !Ref paramServiceName
+        paramApplicationName: !Ref paramApplicationName
+
+Outputs:
+  ApiId:
+    Description: Unique REST API identifier
+    Value: !Ref resApiGateway
+  ApiUrl:
+    Description: API base URL
+    Value: !If
+      - conditionBuildBasePath
+      - !Sub
+        - "https://${domain}/${basePath}"
+        - domain:
+            Fn::ImportValue: !Sub export-environment-domain-api-${paramApplicationName}-${paramEnvironment}
+          basePath: !If
+            - condNotFeatureBranch
+            - !Sub "${paramServiceName}"
+            - !Sub "${paramServiceName}-${paramFeatureBranch}"
+      - !Sub "https://${resApiGateway}.execute-api.${AWS::Region}.amazonaws.com/${paramEnvironment}"
+  ApiHealthEndpoint:
+    Description: Specific URL for the health endpoint
+    Value: !If
+      - conditionBuildBasePath
+      - !Sub
+        - "https://${domain}/${basePath}/health"
+        - domain:
+            Fn::ImportValue: !Sub export-environment-domain-api-${paramApplicationName}-${paramEnvironment}
+          basePath: !If
+            - condNotFeatureBranch
+            - !Sub "${paramServiceName}"
+            - !Sub "${paramServiceName}-${paramFeatureBranch}"
+      - !Sub "https://${resApiGateway}.execute-api.${AWS::Region}.amazonaws.com/${paramEnvironment}/health"

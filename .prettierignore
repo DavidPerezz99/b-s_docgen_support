@@ -1,0 +1,4 @@
+dist/
+coverage/
+compiled_tests/
+node_modules/

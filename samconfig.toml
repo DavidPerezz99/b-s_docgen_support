@@ -1,0 +1,25 @@
+version=0.1
+[default.global.parameters]
+docker_network = "serverless-network"
+template = "microservice.generated.sam.yml"
+
+[default.local_invoke.parameters]
+docker_network = "serverless-network"
+parameter_overrides = "ParameterKey=paramFeatureBranch,ParameterValue=local"
+
+[default.local_start_api.parameters]
+docker_network = "serverless-network"
+parameter_overrides = "ParameterKey=paramFeatureBranch,ParameterValue=local"
+skip_pull_image = true
+
+[default.package.parameters]
+output_template_file = "dist/package.yml"
+template_file = "microservice.generated.sam.yml"
+
+[default.deploy.parameters]
+capabilities = "CAPABILITY_NAMED_IAM"
+no_fail_on_empty_changeset = true
+template_file = "dist/package.yml"
+
+[default.local_start_lambda.parameters]
+docker_network = "serverless-network"

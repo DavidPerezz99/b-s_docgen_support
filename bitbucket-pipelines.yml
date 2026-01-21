@@ -1,0 +1,330 @@
+# ***** IMPORTANT: READ THESE CODE COMMENTS FOR SETUP INSTRUCTIONS *****
+
+# Pipeline process for Galactic Accelerator microservices
+#
+# For Bitbucket to connect to AWS, OpenID Connect (OIDC) is recommended. Follow the accelerator's project setup
+# documentation for initial setup. These docs are found in /docs/project_setup.md
+# That setup will include the deployment of the CloudFormation template found in /build/cfn/serverless-accelerator.ci.yml
+#
+# Prerequisites include the following environment variables to be defined in the Bitbucket repo Settings.
+# These go under Repository Settings -> Pipelines -> Repository Variables
+#   AWS_DEFAULT_REGION: The region to be used for AWS commands (e.g. "us-west-2")
+#   AWS_ACCOUNT_ID: The AWS Account Number for the Dev environment and for feature branches
+#   AWS_ROLE_ARN: The OIDC/CICD IAM role that will be assumed, e.g. "arn:aws:iam::############:role/GalacticOidcRole"
+#   DEFAULT_ENV: When no environment is specified, this is the default environment, e.g. for feature branches and archiving artifacts
+# This template requires the definition of Bitbucket Deployments. Configure the following under Repository Settings -> Pipelines -> Deployments:
+#   dev:
+#     AWS_ACCOUNT_ID: The AWS Account Number for the Dev environment
+#   test:
+#     AWS_ACCOUNT_ID: The AWS Account Number for the Test environment
+#   prod:
+#     AWS_ACCOUNT_ID: The AWS Account Number for the Prod environment
+#
+# The use of the Bitbucket variables BITBUCKET_DEPLOYMENT_ENVIRONMENT will refer to the name of each configured environment.
+#
+# *** SONAR CLOUD ***
+# This template also supports an optional use of SonarCloud.
+# To enable SonarCloud scanning, uncomment the "sonar-scan" step in the pipeline.
+# The Bitbucket repository must also be configured with the following variables:
+#  SONAR_TOKEN: The SonarCloud token for the project (keep this secret, as a secured variable)
+#    The sonar token is generated when you create a new project in SonarCloud.
+
+
+# Step Definitions use yaml anchors (e.g. "&build-test") to be reusable across multiple pipelines.
+# See the bitbucket docs here: https://support.atlassian.com/bitbucket-cloud/docs/yaml-anchors/
+
+image: public.ecr.aws/sam/build-nodejs20.x
+definitions:
+  oidcAuth: &oidcAuth
+    # Authenticate via OIDC to AWS
+    echo "OIDC Authentication to AWS" &&
+    export AWS_WEB_IDENTITY_TOKEN_FILE=$(pwd)/web-identity-token &&
+    echo $BITBUCKET_STEP_OIDC_TOKEN > $(pwd)/web-identity-token &&
+    echo "Authenticated to AWS as this identity:" &&
+    aws sts get-caller-identity &&
+    aws --version &&
+
+    ENV_NAME=${BITBUCKET_DEPLOYMENT_ENVIRONMENT:-$DEFAULT_ENV} &&
+    appName=$(node -pe "require('./package.json').name") &&
+    source build/bash/assume-role.sh &&
+    stsAssumeRole "arn:aws:iam::${AWS_ACCOUNT_ID}:role/pipeline-${ENV_NAME}-${appName}"
+  codeartifact-login: &codeartifact-login
+    # Authenticate to AWS CodeArtifact
+    echo "Authenticating to AWS CodeArtifact" &&
+    aws codeartifact login --tool npm --repository gapi-npm --domain gapi-slalom --namespace @gapi-slalom --domain-owner 288373667213 --region us-east-1
+  caches:
+    node:
+      key:
+        files:
+          - "package-lock.json"
+          - "**/package-lock.json"
+      path: node_modules
+    # If you are using SonarQube or SonarCloud, you can cache the Sonar cache directory
+    sonar: .sonar/cache
+  services:
+    docker:
+      memory: 2048  # increase memory for docker used in sonar pipes
+  steps:
+    - step: &build
+        name: Build
+        oidc: true
+        size: 2x
+        caches:
+          - node
+        script:
+          - *oidcAuth
+          - *codeartifact-login
+          # Output variables that need to be pre-set
+          - echo "BITBUCKET_BRANCH is defined as '${BITBUCKET_BRANCH}'"
+          # Find the current branch name
+          - branch=$(bash ./build/bash/get-current-branch.sh)
+          # Stop the build if there is already a git version tag on this commit
+          - if [[ "${branch}" == "main" ]]; then bash ./build/bash/detect-git-tag.sh; fi
+          - echo "\n\n**********************************************\nBuilding Branch ${branch}\n**********************************************\n\n"
+          # Create a unique semver release version for this build
+          - releaseVersion=$(bash ./build/bash/get-release-version.sh $branch)
+          - echo "Build commencing on branch '$branch' for version '$releaseVersion'."
+          # Build script
+          - bash ./build/bash/build.sh $releaseVersion
+        artifacts:
+          - api-tests/config/**
+          - api-tests/generated.client/**
+          - build/**
+          - config/**
+          - dist/**
+          - generated.swagger.yaml
+          - microservice.generated.sam.yml
+          - microservice.sam.monitoring.yml
+          - samconfig.toml
+          - src/models/generated.models.ts
+    - step: &lint
+        name: Lint
+        oidc: true
+        caches:
+          - node
+        script:
+          - *oidcAuth
+          - *codeartifact-login
+          # Install dependencies
+          - npm ci --loglevel warn
+          # Lint
+          - npm run lint
+    - step: &unit-tests
+        name: Unit Test
+        oidc: true
+        caches:
+          - node
+        script:
+          - *oidcAuth
+          - *codeartifact-login
+          # Install dependencies
+          - npm ci --loglevel warn
+          # Execute unit tests
+          - npm run test
+        artifacts:
+          - coverage/**
+    - step: &sonar-scan
+        name: SonarCloud Scan
+        size: 2x
+        oidc: true
+        caches:
+          - node
+          - sonar
+        clone:
+          depth: full # SonarCloud scanner needs the full history to assign issues properly
+        script:
+          - *oidcAuth
+          - *codeartifact-login
+          # Install dependencies
+          - npm ci --loglevel warn
+          - pipe: sonarsource/sonarcloud-scan:2.0.0
+            variables:
+              SONAR_BINARY_CACHE: $BITBUCKET_CLONE_DIR/.sonar/cache
+              EXTRA_ARGS: '-Dsonar.sources=src -Dsonar.exclusions="src/**/*.spec.ts"
+                -Dsonar.tests=src -Dsonar.test.inclusions="src/**/*.spec.ts"
+                -Dsonar.typescript.lcov.reportPaths=coverage/lcov.info
+                -Dsonar.coverage.exclusions="src/_lambda-handlers/*.ts, src/**/*.spec.ts, src/repositories/**, config/**"
+                -Dsonar.cpd.exclusions="src/**/*.spec.ts"'
+          - pipe: sonarsource/sonarcloud-quality-gate:0.1.6
+            variables:
+              SONAR_BINARY_CACHE: $BITBUCKET_CLONE_DIR/.sonar/cache
+    - step: &git-tag
+        name: Create Git Tag
+        script:
+          - releaseVersion=$(cat build/output/release-version.txt) # release-version.txt was created by a previous build step
+          # Configure git to use the proxied http origin.
+          - git remote set-url origin ${BITBUCKET_GIT_HTTP_ORIGIN}
+          # Create and push the git tag
+          - git tag -a -m "CI on main branch" "$releaseVersion"
+          - git push origin --tags
+          - echo "****** main Release tagged with $releaseVersion"
+    - step: &package
+        name: Package and Archive Artifacts
+        oidc: true
+        script:
+          - *oidcAuth
+          # Package and Archive the build artifacts
+          - bash ./build/bash/package.sh $AWS_DEFAULT_REGION
+        artifacts:
+          - build/output/**
+    - step: &deploy
+        name: Deploy
+        oidc: true
+        script:
+          - *oidcAuth
+          - releaseVersion=$(cat build/output/release-version.txt) # release-version.txt was created by a previous build step
+
+          # Determine the target environment
+          - ENV_NAME=${BITBUCKET_DEPLOYMENT_ENVIRONMENT:-$DEFAULT_ENV}
+          # Deploy the CloudFormation stack and the app files to the selected environment
+          - bash ./build/bash/deploy.sh $releaseVersion $AWS_DEFAULT_REGION $ENV_NAME
+        artifacts:
+          - build/output/**
+    - step: &api-tests
+        name: Execute API Tests
+        oidc: true
+        caches:
+          - node
+        script:
+          - *oidcAuth
+          # Determine the target environment
+          - ENV_NAME=${BITBUCKET_DEPLOYMENT_ENVIRONMENT:-$DEFAULT_ENV}
+          # Run API Tests in Dev and generate report
+          - bash ./build/bash/api-tests.sh $ENV_NAME
+        artifacts:
+          # Save the test reports that get generated from the API tests
+          - api-tests/test-reports/**
+    - step: &performance-tests
+        name: Execute Performance Tests
+        oidc: true
+        caches:
+          - node
+        script:
+          - *oidcAuth
+          # Determine the target environment
+          - ENV_NAME=${BITBUCKET_DEPLOYMENT_ENVIRONMENT:-$DEFAULT_ENV}
+          # Install artillery globally
+          - npm install -g artillery@latest
+          # Run performance tests in Dev and generate report
+          - bash ./build/bash/performance-tests.sh $ENV_NAME
+        artifacts:
+          # Save the test reports that gets generated from the performance tests
+          - api-tests/test-reports/**
+    - step: &health-endpoint
+        name: Health Endpoint
+        script:
+          # Hit the /health endpoint
+          - echo "Hitting the /health endpoint of the last deployment..."
+          - healthEndpoint=$(cat build/output/health-endpoint.txt)
+          - echo "$healthEndpoint"
+          - curl $healthEndpoint
+
+pipelines:
+  branches:
+    # main branch pipeline process, including Continuous Deployment to Prod
+    main:
+      - step: *build
+      - parallel:
+          steps:
+            - step: *git-tag
+            - step: *lint
+            - step: *unit-tests
+            - step: *package
+      # Sonar Scan must happen after unit-tests have generated the coverage report
+      - step: *sonar-scan
+      - stage:
+          name: Dev Environment
+          deployment: dev
+          steps:
+            - step: *deploy
+            - step: *api-tests
+      - stage:
+          name: Test Environment
+          deployment: test
+          steps:
+            - step: *deploy
+            - step: *api-tests
+      # Prod Deployment
+      # - stage:
+      #     name: Prod Environment
+      #     deployment: prod
+      #     # Optionally use manual trigger for Prod deployments
+      #     trigger: manual
+      #     steps:
+      #       - step: *deploy
+      #       # Smoke tests only (e.g. Health Endpoint) in Prod
+      #       - step: *health-endpoint
+
+    ## Branches with the performance prefix will run these steps (example: performance/test-123)
+    performance/*:
+      - step: *build
+      - parallel:
+          steps:
+            - step: *lint
+            - step: *unit-tests
+            - step: *package
+      # Sonar Scan must happen after unit-tests have generated the coverage report
+      - step: *sonar-scan
+      - step: *deploy
+      - parallel:
+          steps:
+            - step: *api-tests
+            - step: *performance-tests
+
+  ## All Feature Branches follow these steps
+  default:
+    - stage:
+        name: Feature Branch Build
+        steps:
+          - step: *build
+          - step: *package
+    - parallel:
+        steps:
+          - step: *deploy
+          - step: *unit-tests
+    - parallel:
+        # Most tests do not need to prevent the Feature Branch from being deployed,
+        # so we do them _after_ the deployment. If these fail, the pipeline will report the failure,
+        # but the deployment will still be available for exploratory testing.
+        steps:
+          - step: *lint
+          # Sonar Scan must happen after unit-tests have generated the coverage report
+          - step: *sonar-scan
+          - step: *api-tests
+
+  custom:
+    # The deploy-release-to-prod pipeline is an example of how to define a manually triggered
+    # deployment to a specific environment. We are not able to parameterize the "deployment"
+    # value as long as we still want to make use of the Bitbucket "Deployments" tracking feature.
+    # You could very easily create a separate manual pipeline for each environment if needed,
+    # but that would be undermining the objectives of Continuous Delivery.
+    deploy-release-to-prod:
+      - variables:
+          - name: RELEASE_VERSION
+            description: "The complete semver version to deploy, e.g. 'v0.1.0'"
+      - step:
+          name: Deploy Version to Prod
+          oidc: true
+          deployment: prod
+          clone:
+            depth: 1
+          script:
+            - *oidcAuth
+            - appName=$(node -pe "require('./package.json').name")
+            # Deploy the CloudFormation stack and the app files to the selected environment
+            - bash ./build/bash/deploy-version.sh $RELEASE_VERSION $AWS_DEFAULT_REGION prod $appName
+          artifacts:
+            - build/output/**
+      - step: *health-endpoint
+    # Use the feature-branch-cleanup pipeline to delete the AWS Cloudformation stacks that are no longer needed
+    # based on inspecting which git branches no longer exist
+    # This pipeline may be executed manually or on a schedule, using the Bitbucket browser interface for scheduling pipelines
+    feature-branch-cleanup:
+      - step:
+          name: Feature Branch Cleanup
+          oidc: true
+          clone:
+            depth: full
+          script:
+            - *oidcAuth
+            - bash build/bash/feature-branch-cleanup.sh

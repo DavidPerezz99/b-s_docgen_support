@@ -1,0 +1,37 @@
+{
+  "entryFile": "src/config/ioc.container.ts",
+  "noImplicitAdditionalProperties": "silently-remove-extras",
+  "controllerPathGlobs": ["src/**/*controller.ts"],
+  "spec": {
+    "specFileBaseName": "generated.swagger",
+    "outputDirectory": "./",
+    "specVersion": 3,
+    "yaml": true,
+    "spec": {
+      "servers": [
+        {
+          "url": "https://api.business.devslalom.com/docgen",
+          "description": "Dev environment"
+        },
+        {
+          "url": "https://api.business.testslalom.com/docgen",
+          "description": "Test environment"
+        },
+        {
+          "url": "https://api.business.slalom.com/docgen",
+          "description": "Prod environment"
+        }
+      ]
+    }
+  },
+  "routes": {
+    "routesDir": "./src/_lambda-handlers",
+    "modelsDir": "./src/models",
+    "routeGenerator": "./dist/serverlessRouteGenerator.js",
+    "iocModule": "./src/config/ioc.container.ts",
+    "modelsTemplate": "./src/models/models.hbs",
+    "handlerTemplate": "./src/_lambda-handlers/handler.hbs",
+    "lambdaTemplate": "./build/templates/sam.lambda.yml.hbs",
+    "lambdaConfigFile": "./config/lambdas/config.json"
+  }
+}

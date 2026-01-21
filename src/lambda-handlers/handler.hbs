@@ -1,0 +1,32 @@
+{{!-- This file is a handlebars template used to generate @Controller annotated lambda handlers --}}
+// WARNING: This file was auto-generated with tsoa. Please do not modify it. Re-run tsoa to re-generate this file: https://github.com/lukeautry/tsoa
+{{#if iocModule}}
+import { container } from "{{iocModule}}.ts";
+{{/if}}
+import { {{controller.name}} } from "{{controller.modulePath}}.ts";
+import { MethodMetadata } from "../models/parameterMetadata.ts";
+import { APIGatewayProxyHandler, APIGatewayProxyEvent } from "aws-lambda/trigger/api-gateway-proxy.ts";
+import { LumigoService } from "@gapi-slalom/lib-common/dist/services/lumigo.service.js";
+
+export const controller: {{controller.name}} = container.get<{{controller.name}}>({{controller.name}});
+const lumigoService = container.get(LumigoService);
+const successStatus = {{action.successStatus}};
+
+const metadata: MethodMetadata = {
+  /* Auto-generated parameter schema from our spec (empty if no params to extract)  */
+  successStatus: successStatus || 200,
+  parameterMetadata: {
+    {{#each action.parameters}}
+    {{@key}}: {{{json this}}},
+    {{/each}}
+  }
+};
+
+/**
+ *   Handler for:
+ *   {{action.method}} {{action.fullPath}}
+ *
+ */
+export const handler: APIGatewayProxyHandler = lumigoService.traceLambda(async (event: APIGatewayProxyEvent) => {
+  return controller.invoke(controller.{{action.name}}, event, metadata);
+});

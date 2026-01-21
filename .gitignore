@@ -1,0 +1,48 @@
+# Logs and databases #
+######################
+*.log
+*.sql
+*.sqlite
+
+# OS generated files #
+######################
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Build Systems #
+#################
+**/node_modules/
+.sass-cache
+**/build/output
+
+# Compiled Output #
+###################
+**/dist/*
+**/coverage/*
+**/compiled_tests/*
+**/*.generated.*
+generated.*
+# Cached compilation files for typescript
+.tsimp
+
+# IDE generated files #
+#######################
+.idea/*
+*.iml
+
+# Python Cache Files#
+#####################
+**/__pycache__/*
+
+# Test reports#
+#####################
+api-tests/test-reports/
+
+# CDK #
+###################
+cdk.setup.json

@@ -1,0 +1,251 @@
+---
+# Purpose: Service monitoring to be deployed for Prod environments
+AWSTemplateFormatVersion: 2010-09-09
+Description: Serverless Accelerator Nested Stack for service monitoring and alarms
+Parameters:
+  paramEnvironment:
+    Type: String
+    Description: Which environment do you want to deploy to? (local, dev, test, or prod)
+  paramFeatureBranch:
+    Type: String
+    Description: Provide the name of the feature branch if this is not a build from the main code branch.
+  paramServiceName:
+    Type: String
+    Description: The name of the service
+  paramApplicationName:
+    Type: String
+    Description: This is the name of your whole system, which likely is composed of multiple microservices and possibly a frontend also.
+
+Conditions:
+  conditionIsProd: !Equals [!Ref paramEnvironment, prod]
+
+Resources:
+  #
+  # MONITORING ALARMS for PROD
+  #
+
+  # Create a healthcheck object for PROD
+  # ref: https://docs.aws.amazon.com/Route53/latest/APIReference/API_HealthCheckConfig.html
+  resHealthCheck:
+    Type: "AWS::Route53::HealthCheck"
+    Properties:
+      HealthCheckConfig:
+        Type: HTTPS
+        ResourcePath: !Sub "/${paramServiceName}/health"
+        FullyQualifiedDomainName:
+          Fn::ImportValue: !Sub export-environment-domain-api-${paramApplicationName}-${paramEnvironment}
+        RequestInterval: 30
+        FailureThreshold: 3
+        EnableSNI: True
+      HealthCheckTags:
+        - Key: Name
+          Value: !Ref paramServiceName
+
+  # CloudWatch Alarms and associated notifications via SNS
+  resSnsAlarmNotificationTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !ImportValue export-alarm-sns-topic-arn
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: AllowAlarmsPublish
+            Effect: Allow
+            Action: sns:Publish
+            Resource: !ImportValue export-alarm-sns-topic-arn
+            Principal:
+              AWS: "*"
+            Condition:
+              StringLike:
+                aws:SourceArn: !Sub arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${paramEnvironment}${paramFeatureBranch}_${paramServiceName}_*
+
+  # This alarm goes off for lambda invocation error for all functions
+  resAlarmLambdaInvocationError:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${paramEnvironment}${paramFeatureBranch}_${paramServiceName}_lambdaInvocationError"
+      AlarmDescription: Lambda Invocation Error > 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      DatapointsToAlarm: 1
+      # Uncomment to get metric for specific functions
+      # Dimensions:
+      #   - Name: FunctionName
+      #     Value: !Sub "${paramEnvironment}${paramFeatureBranch}_${paramServiceName}_xxx"
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      AlarmActions:
+        - !ImportValue export-alarm-sns-topic-arn
+      EvaluationPeriods: 1
+      Period: 60
+      Statistic: Sum
+      # Adjust threshold as necessary
+      Threshold: !If [conditionIsProd, 1, 100]
+      TreatMissingData: ignore
+
+  # This alarm goes off for all 500 errors returned by the API Gateway
+  resAlarmRestApi500:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${paramEnvironment}${paramFeatureBranch}_${paramServiceName}_5XXError"
+      AlarmDescription: RestAPI 500 Error > 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      DatapointsToAlarm: 1
+      Dimensions:
+        - Name: ApiName # This must match the Name property of the Rest API
+          Value: !Sub "${paramEnvironment} ${paramServiceName} ${paramFeatureBranch}"
+        - Name: Stage
+          Value: !Ref paramEnvironment
+      MetricName: 5XXError
+      Namespace: AWS/ApiGateway
+      AlarmActions:
+        - !ImportValue export-alarm-sns-topic-arn
+      EvaluationPeriods: 1
+      Period: 60
+      Statistic: Sum
+      # Adjust threshold as necessary
+      Threshold: !If [conditionIsProd, 1, 100]
+      TreatMissingData: ignore
+
+  # This alarm goes off when 90% of the API requests have a Latency that is greater than 500 milliseconds
+  resAlarmRestApiLatencyP90:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${paramEnvironment}${paramFeatureBranch}_${paramServiceName}_latency-p90"
+      AlarmDescription: RestAPI Latency p90 > 500ms
+      ComparisonOperator: GreaterThanThreshold
+      DatapointsToAlarm: 1
+      Dimensions:
+        - Name: ApiName # This must match the Name property of the Rest API
+          Value: !Sub "${paramEnvironment} ${paramServiceName} ${paramFeatureBranch}"
+        - Name: Stage
+          Value: !Ref paramEnvironment
+      MetricName: Latency
+      Namespace: AWS/ApiGateway
+      AlarmActions:
+        - !ImportValue export-alarm-sns-topic-arn
+      EvaluationPeriods: 2
+      Period: 60
+      ExtendedStatistic: p90
+      # Adjust threshold as necessary
+      Threshold: 500
+      TreatMissingData: ignore
+
+  # This alarm goes off when 95% of the API requests have a Latency that is greater than 2 seconds
+  resAlarmRestApiLatencyP95:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${paramEnvironment}${paramFeatureBranch}_${paramServiceName}_latency-p95"
+      AlarmDescription: RestAPI Latency Error p95 > 2 seconds
+      ComparisonOperator: GreaterThanThreshold
+      DatapointsToAlarm: 1
+      Dimensions:
+        - Name: ApiName # This must match the Name property of the Rest API
+          Value: !Sub "${paramEnvironment} ${paramServiceName} ${paramFeatureBranch}"
+        - Name: Stage
+          Value: !Ref paramEnvironment
+      MetricName: Latency
+      Namespace: AWS/ApiGateway
+      AlarmActions:
+        - !ImportValue export-alarm-sns-topic-arn
+      EvaluationPeriods: 2
+      Period: 60
+      ExtendedStatistic: p95
+      # Adjust threshold as necessary
+      Threshold: 2000
+      TreatMissingData: ignore
+
+  # This alarm goes off when 99% of the API requests have a Latency that is greater 5 seconds
+  resAlarmRestApiLatencyP99:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${paramEnvironment}${paramFeatureBranch}_${paramServiceName}_latency-p99"
+      AlarmDescription: RestAPI Latency p99 > 5 seconds
+      ComparisonOperator: GreaterThanThreshold
+      DatapointsToAlarm: 1
+      Dimensions:
+        - Name: ApiName # This must match the Name property of the Rest API
+          Value: !Sub "${paramEnvironment} ${paramServiceName} ${paramFeatureBranch}"
+        - Name: Stage
+          Value: !Ref paramEnvironment
+      MetricName: Latency
+      Namespace: AWS/ApiGateway
+      AlarmActions:
+        - !ImportValue export-alarm-sns-topic-arn
+      EvaluationPeriods: 2
+      Period: 60
+      ExtendedStatistic: p99
+      # Adjust threshold as necessary
+      Threshold: 5000
+      TreatMissingData: ignore
+
+  # CloudWatch Dashboard to monitor metrics
+  # The DashboardBody must be a JSON string within the YML template, so we use "Fn::Join" to present formatted JSON below
+  resDashBoardAPI:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub "${paramEnvironment}${paramFeatureBranch}_${paramServiceName}_Monitoring_Dashboard"
+      DashboardBody: { "Fn::Join": [
+              "",
+              [
+                '{"widgets":[
+                {
+                "type":"metric",
+                "x": 0,
+                "y": 0,
+                "width": 6,
+                "height": 6,
+                "properties":{
+                "metrics":[
+                ["AWS/ApiGateway", "5XXError", "ApiName", "',
+                !Sub "${paramEnvironment} ${paramServiceName} ${paramFeatureBranch}",
+                '"]
+                ],
+                "title":"API Gateway 5xx Errors",
+                "period":21600,
+                "region": "',
+                !Sub "${AWS::Region}",
+                '",
+                "stat":"Sum"
+                }
+                },{
+                "type":"metric",
+                "x": 7,
+                "y": 0,
+                "width": 6,
+                "height": 6,
+                "properties":{
+                "metrics":[
+                ["AWS/ApiGateway", "4XXError", "ApiName", "',
+                !Sub "${paramEnvironment} ${paramServiceName} ${paramFeatureBranch}",
+                '"]
+                ],
+                "title":"API Gateway 4xx Errors",
+                "period":21600,
+                "region": "',
+                !Sub "${AWS::Region}",
+                '",
+                "stat":"Sum"
+                }
+                },{
+                "type":"metric",
+                "x": 14,
+                "y": 0,
+                "width": 6,
+                "height": 6,
+                "properties":{
+                "metrics":[
+                ["AWS/ApiGateway", "Count", "ApiName", "',
+                !Sub "${paramEnvironment} ${paramServiceName} ${paramFeatureBranch}",
+                '"]
+                ],
+                "title":"Total Count of API Requests",
+                "period":21600,
+                "region": "',
+                !Sub "${AWS::Region}",
+                '",
+                "stat":"Sum"
+                }
+                }]}'
+              ]
+            ] }

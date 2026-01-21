@@ -1,0 +1,18 @@
+{
+  "extends": "@tsconfig/node20/tsconfig.json",
+  "compilerOptions": {
+    "sourceMap": true,
+    /* Type declaration files to be included in compilation. */
+    "types": [
+      "node",
+      "jest",
+      "reflect-metadata"
+    ],
+    "emitDecoratorMetadata": true,
+    "experimentalDecorators": true,
+    "module": "preserve",
+    "moduleResolution": "bundler",
+    "removeComments": true
+  },
+  "include": [ "src/**/*" ]
+}
